@@ -162,12 +162,14 @@ function comboSums(a1, a2, a3, allstatCount) {
 }
 
 function targetSatisfied(t, sums) {
+  // 모자/장갑 동반 스탯: 지정된 단일 스탯만 유효 (직업군별 아이템 분리)
+  const statVal = t.stat ? sums.s[t.stat] : sums.maxStat;
   switch (t.kind) {
     case "stat": return sums.s[t.stat] >= t.min;
     case "allsum": return sums.allSum >= t.min;
     case "hp": return sums.hp >= t.min;
-    case "hat": return sums.cd >= t.cd && sums.maxStat >= t.statMin;
-    case "glove": return sums.crit >= t.crit && sums.maxStat >= t.statMin;
+    case "hat": return sums.cd >= t.cd && (t.statMin === 0 || statVal >= t.statMin);
+    case "glove": return sums.crit >= t.crit && (t.statMin === 0 || statVal >= t.statMin);
     case "dm":
       if (t.combo === "drop2") return sums.drop >= 2;
       if (t.combo === "meso2") return sums.meso >= 2;
@@ -455,8 +457,8 @@ export default function App() {
   const [allstatCount, setAllstatCount] = useState(true);
   const [costs, setCosts] = useState({ ...COST_DEFAULT[200] });
   const [statPrices, setStatPrices] = useState({});
-  const [hatRows, setHatRows] = useState([{ cd: 2, statMin: 12, price: "" }, { cd: 3, statMin: 0, price: "" }, { cd: 4, statMin: 0, price: "" }]);
-  const [gloveRows, setGloveRows] = useState([{ crit: 8, statMin: 12, price: "" }, { crit: 16, statMin: 0, price: "" }, { crit: 24, statMin: 0, price: "" }]);
+  const [hatRows, setHatRows] = useState([{ cd: 2, statMin: 12, stat: "STR", price: "" }, { cd: 3, statMin: 0, stat: "STR", price: "" }, { cd: 4, statMin: 0, stat: "STR", price: "" }]);
+  const [gloveRows, setGloveRows] = useState([{ crit: 8, statMin: 12, stat: "STR", price: "" }, { crit: 16, statMin: 0, stat: "STR", price: "" }, { crit: 24, statMin: 0, stat: "STR", price: "" }]);
   const [accPrices, setAccPrices] = useState({ drop2: "", meso2: "", dropmeso: "", dm3: "" });
 
   useEffect(() => { setCosts({ ...COST_DEFAULT[level] }); }, [level]);
@@ -500,13 +502,13 @@ export default function App() {
     }
     if (part === "hat") hatRows.forEach((r, i) => {
       const p = num(r.price);
-      if (p) list.push({ id: `hat_${i}`, kind: "hat", cd: r.cd, statMin: r.statMin, price: p,
-        label: `쿨감 ${r.cd}초↑${r.statMin ? ` + 스탯 ${r.statMin}%↑` : ""}` });
+      if (p) list.push({ id: `hat_${i}`, kind: "hat", cd: r.cd, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
+        label: `쿨감 ${r.cd}초↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}` });
     });
     if (part === "glove") gloveRows.forEach((r, i) => {
       const p = num(r.price);
-      if (p) list.push({ id: `glove_${i}`, kind: "glove", crit: r.crit, statMin: r.statMin, price: p,
-        label: `크뎀 ${r.crit}%↑${r.statMin ? ` + 스탯 ${r.statMin}%↑` : ""}` });
+      if (p) list.push({ id: `glove_${i}`, kind: "glove", crit: r.crit, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
+        label: `크뎀 ${r.crit}%↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}` });
     });
     if (part === "acc") {
       const labels = { drop2: "드랍 2줄↑", meso2: "메획 2줄↑", dropmeso: "드랍+메획 각 1줄↑", dm3: "드메 합 3줄" };
@@ -722,6 +724,14 @@ export default function App() {
                       style={{ ...inputStyle, width: 130 }}>
                       {statMinOpts.map((m) => <option key={m} value={m}>{m === 0 ? "스탯 무관" : `+ 스탯 ${m}%↑`}</option>)}
                     </select>
+                    {r.statMin > 0 && (
+                      <select value={r.stat || "STR"}
+                        onChange={(e) => (part === "hat" ? setHatRows(hatRows.map((x, k) => k === i ? { ...x, stat: e.target.value } : x))
+                          : setGloveRows(gloveRows.map((x, k) => k === i ? { ...x, stat: e.target.value } : x)))}
+                        style={{ ...inputStyle, width: 76 }}>
+                        {STATS.map((s) => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    )}
                     <Num w={80} value={r.price} ph="가격(억)"
                       onChange={(v) => (part === "hat" ? setHatRows(hatRows.map((x, k) => k === i ? { ...x, price: v } : x))
                         : setGloveRows(gloveRows.map((x, k) => k === i ? { ...x, price: v } : x)))} />
@@ -729,7 +739,7 @@ export default function App() {
                       style={{ background: "none", border: "none", color: C.sub, cursor: "pointer", fontSize: 14 }}>✕</button>
                   </div>
                 ))}
-                <button onClick={() => (part === "hat" ? setHatRows([...hatRows, { cd: 2, statMin: 0, price: "" }]) : setGloveRows([...gloveRows, { crit: 8, statMin: 0, price: "" }]))}
+                <button onClick={() => (part === "hat" ? setHatRows([...hatRows, { cd: 2, statMin: 0, stat: "STR", price: "" }]) : setGloveRows([...gloveRows, { crit: 8, statMin: 0, stat: "STR", price: "" }]))}
                   style={{ ...inputStyle, width: "auto", cursor: "pointer", color: C.accent }}>+ 조합 추가</button>
               </div>
             )}
