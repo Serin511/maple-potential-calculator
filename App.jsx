@@ -353,7 +353,7 @@ function mulberry32(a) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-function runMC(eng, cfg, startJ, rounds) {
+function runMC(eng, cfg, startJ, rounds, independentStart = false) {
   const { costs, itemPrice, floorPrice } = cfg;
   const rnd = mulberry32(20260721);
   const sample = (cum, fallback) => {
@@ -365,6 +365,7 @@ function runMC(eng, cfg, startJ, rounds) {
   const profits = []; const tidCount = {}; let totResets = 0;
   let j = startJ;
   for (let i = 0; i < rounds; i++) {
+    if (independentStart) j = startJ; // 단일 라운드 모드: 매번 현재 스택에서 시작
     let cost = itemPrice, resets = 0, rev = 0, tid = null;
     for (let k = 1; k <= PITY.epic + 1; k++) { resets++; cost += costs.epic; if (k === PITY.epic + 1 || rnd() < eng.pE) break; }
     let done = false;
@@ -539,9 +540,10 @@ export default function App() {
       const eng = buildEngine(cfg);
       const j0 = Math.max(0, Math.min(PITY.unique, parseInt(dcfg.pity) || 0));
       const first = eng.round(j0);
+      const singleRound = j0 > 0; // 천장 스택 보유 시 단일 라운드 기준 표시
       const estRounds = Math.max(2000, Math.min(15000, Math.floor(1.5e6 / Math.max(20, eng.steady.resets))));
-      const mc = runMC(eng, cfg, j0, estRounds);
-      return { eng, cfg, first, j0, mc };
+      const mc = runMC(eng, cfg, j0, estRounds, singleRound);
+      return { eng, cfg, first, j0, mc, singleRound };
     } catch (e) { return { error: String(e) }; }
   }, [dcfg]);
 
@@ -564,6 +566,12 @@ export default function App() {
       };
     }
   }
+  const sr = eng ? !!result.singleRound : false;
+  const disp = eng
+    ? (sr
+      ? { profit: result.first.profit, resets: result.first.resets, breakeven: result.first.rev - result.first.cost }
+      : { profit: eng.steady.profit, resets: eng.steady.resets, breakeven: eng.breakeven })
+    : null;
   const compTotal = result && result.mc ? result.mc.rounds : 0;
   const compEntries = result && result.mc
     ? Object.entries(result.mc.tidCount).sort((a, b) => b[1] - a[1]).map(([tid, n]) => ({
@@ -783,10 +791,10 @@ export default function App() {
                 )}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
                   {[
-                    ["재설정 1회당 기대 이득", eng.steady.profit / eng.steady.resets, true],
-                    ["라운드당 기대 순익 (장기)", eng.steady.profit, true],
-                    ["라운드당 기대 재설정", eng.steady.resets, false],
-                    ["손익분기 노작 매입가", eng.breakeven, null],
+                    ["재설정 1회당 기대 이득", disp.profit / disp.resets, true],
+                    [sr ? `이번 라운드 기대 순익 (천장 ${result.j0} 반영)` : "라운드당 기대 순익 (장기)", disp.profit, true],
+                    [sr ? "이번 라운드 기대 재설정" : "라운드당 기대 재설정", disp.resets, false],
+                    ["손익분기 노작 매입가", disp.breakeven, null],
                   ].map(([lb, v, money]) => (
                     <div key={lb} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px" }}>
                       <div style={{ fontSize: 11, color: C.sub, marginBottom: 4 }}>{lb}</div>
@@ -797,11 +805,19 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: C.sub }}>
-                  현재 천장 {result.j0}회 기준 첫 라운드: 순익 <b style={{ color: result.first.profit >= 0 ? C.ok : C.danger }}>
-                  {(result.first.profit >= 0 ? "+" : "") + fmtMeso(result.first.profit)}</b> · 재설정 {result.first.resets.toFixed(1)}회 ·
-                  투입 {fmtMeso(result.first.cost)} · 재진입 비용(매입가+에픽 {eng.epicRolls.toFixed(1)}회): {fmtMeso(eng.reentry)}
-                </div>
+                {sr ? (
+                  <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: C.sub }}>
+                    천장 {result.j0}스택을 반영한 <b style={{ color: C.text }}>단일 라운드 기준</b>입니다 · 장기 평균(스택 평형): 라운드당 <b style={{ color: eng.steady.profit >= 0 ? C.ok : C.danger }}>
+                    {(eng.steady.profit >= 0 ? "+" : "") + fmtMeso(eng.steady.profit)}</b> / {eng.steady.resets.toFixed(1)}회 ·
+                    재진입 비용(매입가+에픽 {eng.epicRolls.toFixed(1)}회): {fmtMeso(eng.reentry)}
+                  </div>
+                ) : (
+                  <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: C.sub }}>
+                    현재 천장 {result.j0}회 기준 첫 라운드: 순익 <b style={{ color: result.first.profit >= 0 ? C.ok : C.danger }}>
+                    {(result.first.profit >= 0 ? "+" : "") + fmtMeso(result.first.profit)}</b> · 재설정 {result.first.resets.toFixed(1)}회 ·
+                    투입 {fmtMeso(result.first.cost)} · 재진입 비용(매입가+에픽 {eng.epicRolls.toFixed(1)}회): {fmtMeso(eng.reentry)}
+                  </div>
+                )}
 
                 {/* 타겟 판정 */}
                 <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
@@ -843,7 +859,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
                     <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>
-                      라운드 종료 구성 (시뮬레이션 {result.mc.rounds.toLocaleString()}라운드)
+                      라운드 종료 구성 (시뮬레이션 {result.mc.rounds.toLocaleString()}라운드{sr ? " · 현재 스택 시작" : ""})
                     </div>
                     {compEntries.map((e) => (
                       <div key={e.label} style={{ marginBottom: 6 }}>
@@ -857,7 +873,7 @@ export default function App() {
                     ))}
                   </div>
                   <div style={{ flex: "1 1 220px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
-                    <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>라운드 순익 분포 (리스크)</div>
+                    <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>라운드 순익 분포 (리스크{sr ? " · 현재 스택 시작" : ""})</div>
                     {[["하위 10% (불운)", result.mc.p10], ["중앙값", result.mc.p50], ["상위 10% (행운)", result.mc.p90]].map(([lb, v]) => (
                       <div key={lb} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${C.border}` }}>
                         <span style={{ color: C.sub }}>{lb}</span>
