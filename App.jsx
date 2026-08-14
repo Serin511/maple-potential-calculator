@@ -353,7 +353,8 @@ function mulberry32(a) {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
-function runMC(eng, cfg, startJ, rounds, independentStart = false) {
+function runMC(eng, cfg, startJ, samples, mode = "chain") {
+  // mode: "chain"(장기 연속) | "independent"(단일 라운드 반복) | "campaign"(천장 소모까지 라운드 반복)
   const { costs, itemPrice, floorPrice } = cfg;
   const rnd = mulberry32(20260721);
   const sample = (cum, fallback) => {
@@ -362,41 +363,64 @@ function runMC(eng, cfg, startJ, rounds, independentStart = false) {
     for (const e of cum) if (r <= e.c) return e;
     return cum[cum.length - 1];
   };
-  const profits = []; const tidCount = {}; let totResets = 0;
+  const profits = []; const tidCount = {}; let totResets = 0, totRounds = 0;
   let j = startJ;
-  for (let i = 0; i < rounds; i++) {
-    if (independentStart) j = startJ; // 단일 라운드 모드: 매번 현재 스택에서 시작
-    let cost = itemPrice, resets = 0, rev = 0, tid = null;
-    for (let k = 1; k <= PITY.epic + 1; k++) { resets++; cost += costs.epic; if (k === PITY.epic + 1 || rnd() < eng.pE) break; }
-    let done = false;
-    if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
-    while (!done) {
-      const up = j >= PITY.unique ? true : rnd() < eng.pL;
-      resets++; cost += costs.unique;
-      if (up) {
-        j = 0;
-        if (eng.legMode === "A") { rev = floorPrice * eng.feeMul; tid = "__floor"; }
-        else if (eng.legMode === "C") {
-          // 매 롤이 판매 조건: 승급 롤에서 타겟 or 깡통가로 즉시 판매
-          if (rnd() < eng.lSt.q) { const s = sample(eng.lSt.cum, 0); rev = s.rev; tid = s.tid; }
-          else { rev = floorPrice * eng.feeMul; tid = "__floor"; }
+  for (let i = 0; i < samples; i++) {
+    if (mode !== "chain") j = startJ; // 매 표본을 현재 스택에서 시작
+    let acc = 0, accResets = 0, legendHit = false;
+    do {
+      let cost = itemPrice, resets = 0, rev = 0, tid = null;
+      for (let k = 1; k <= PITY.epic + 1; k++) { resets++; cost += costs.epic; if (k === PITY.epic + 1 || rnd() < eng.pE) break; }
+      let done = false;
+      if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
+      while (!done) {
+        const up = j >= PITY.unique ? true : rnd() < eng.pL;
+        resets++; cost += costs.unique;
+        if (up) {
+          j = 0; legendHit = true;
+          if (eng.legMode === "A") { rev = floorPrice * eng.feeMul; tid = "__floor"; }
+          else if (eng.legMode === "C") {
+            // 매 롤이 판매 조건: 승급 롤에서 타겟 or 깡통가로 즉시 판매
+            if (rnd() < eng.lSt.q) { const s = sample(eng.lSt.cum, 0); rev = s.rev; tid = s.tid; }
+            else { rev = floorPrice * eng.feeMul; tid = "__floor"; }
+          } else {
+            if (rnd() >= eng.lSt.q) { do { resets++; cost += costs.legend; } while (rnd() >= eng.lSt.q); }
+            const s = sample(eng.lSt.cum, floorPrice * eng.feeMul); rev = s.rev; tid = s.tid;
+          }
+          done = true;
         } else {
-          if (rnd() >= eng.lSt.q) { do { resets++; cost += costs.legend; } while (rnd() >= eng.lSt.q); }
-          const s = sample(eng.lSt.cum, floorPrice * eng.feeMul); rev = s.rev; tid = s.tid;
+          j++;
+          if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
         }
-        done = true;
-      } else {
-        j++;
-        if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
       }
-    }
-    profits.push(rev - cost);
-    tidCount[tid] = (tidCount[tid] || 0) + 1;
-    totResets += resets;
+      acc += rev - cost; accResets += resets; totRounds++;
+      tidCount[tid] = (tidCount[tid] || 0) + 1;
+    } while (mode === "campaign" && !legendHit);
+    profits.push(acc);
+    totResets += accResets;
   }
   profits.sort((a, b) => a - b);
   const pct = (p) => profits[Math.min(profits.length - 1, Math.floor(p * profits.length))];
-  return { p10: pct(0.1), p50: pct(0.5), p90: pct(0.9), tidCount, rounds, avgResets: totResets / rounds };
+  return { p10: pct(0.1), p50: pct(0.5), p90: pct(0.9), tidCount, rounds: samples, compRounds: totRounds, avgResets: totResets / samples, avgRounds: totRounds / samples };
+}
+
+// 천장 소모(레전드리 도달)까지 라운드 반복 기대치 (j0 ≥ 1)
+// 유니크 판매 라운드는 스택 유지/증가 → 자기·상향 전이 재귀를 후진으로 풀이
+function campaignStats(eng, j0, itemPrice) {
+  const N = PITY.unique + 1;
+  const P = new Float64Array(N), R = new Float64Array(N), Ro = new Float64Array(N);
+  for (let j = N - 1; j >= 1; j--) {
+    const d = eng.roundDist(j), r = eng.round(j);
+    let p = r.profit, re = r.resets, ro = 1;
+    for (let k = j + 1; k < N; k++) {
+      if (d[k] < 1e-15) continue;
+      p += d[k] * P[k]; re += d[k] * R[k]; ro += d[k] * Ro[k];
+    }
+    const denom = Math.max(1e-9, 1 - d[j]);
+    P[j] = p / denom; R[j] = re / denom; Ro[j] = ro / denom;
+  }
+  const rounds = Math.max(Ro[j0], 1e-9);
+  return { profit: P[j0], resets: R[j0], rounds, breakeven: (P[j0] + rounds * itemPrice) / rounds };
 }
 
 // ---------- 포맷 ----------
@@ -461,6 +485,7 @@ export default function App() {
   const [hatRows, setHatRows] = useState([{ cd: 2, statMin: 12, stat: "STR", price: "" }, { cd: 3, statMin: 0, stat: "STR", price: "" }, { cd: 4, statMin: 0, stat: "STR", price: "" }]);
   const [gloveRows, setGloveRows] = useState([{ crit: 8, statMin: 12, stat: "STR", price: "" }, { crit: 16, statMin: 0, stat: "STR", price: "" }, { crit: 24, statMin: 0, stat: "STR", price: "" }]);
   const [accPrices, setAccPrices] = useState({ drop2: "", meso2: "", dropmeso: "", dm3: "" });
+  const [pityMode, setPityMode] = useState("single"); // 스택>0 표시 모드: single | campaign
 
   useEffect(() => { setCosts({ ...COST_DEFAULT[level] }); }, [level]);
 
@@ -522,8 +547,8 @@ export default function App() {
   }, [part, thresholds, allThresholds, statPrices, hatRows, gloveRows, accPrices]);
 
   const cfgInput = useMemo(() => ({
-    targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity,
-  }), [targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity]);
+    targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity, pityMode,
+  }), [targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity, pityMode]);
   const dcfg = useDeferredValue(cfgInput);
 
   const result = useMemo(() => {
@@ -540,10 +565,13 @@ export default function App() {
       const eng = buildEngine(cfg);
       const j0 = Math.max(0, Math.min(PITY.unique, parseInt(dcfg.pity) || 0));
       const first = eng.round(j0);
-      const singleRound = j0 > 0; // 천장 스택 보유 시 단일 라운드 기준 표시
-      const estRounds = Math.max(2000, Math.min(15000, Math.floor(1.5e6 / Math.max(20, eng.steady.resets))));
-      const mc = runMC(eng, cfg, j0, estRounds, singleRound);
-      return { eng, cfg, first, j0, mc, singleRound };
+      const singleRound = j0 > 0; // 천장 스택 보유 시 단일/캠페인 기준 표시
+      const camp = singleRound ? campaignStats(eng, j0, cfg.itemPrice) : null;
+      const mcMode = !singleRound ? "chain" : (dcfg.pityMode === "campaign" ? "campaign" : "independent");
+      const baseResets = mcMode === "campaign" && camp ? camp.resets : eng.steady.resets;
+      const estRounds = Math.max(1000, Math.min(15000, Math.floor(1.5e6 / Math.max(20, baseResets))));
+      const mc = runMC(eng, cfg, j0, estRounds, mcMode);
+      return { eng, cfg, first, j0, mc, singleRound, camp, pityMode: dcfg.pityMode };
     } catch (e) { return { error: String(e) }; }
   }, [dcfg]);
 
@@ -567,12 +595,15 @@ export default function App() {
     }
   }
   const sr = eng ? !!result.singleRound : false;
+  const pm = sr ? result.pityMode : null;
   const disp = eng
-    ? (sr
-      ? { profit: result.first.profit, resets: result.first.resets, breakeven: result.first.rev - result.first.cost }
-      : { profit: eng.steady.profit, resets: eng.steady.resets, breakeven: eng.breakeven })
+    ? (sr && pm === "campaign" && result.camp
+      ? { profit: result.camp.profit, resets: result.camp.resets, breakeven: result.camp.breakeven }
+      : sr
+        ? { profit: result.first.profit, resets: result.first.resets, breakeven: result.first.rev - result.first.cost }
+        : { profit: eng.steady.profit, resets: eng.steady.resets, breakeven: eng.breakeven })
     : null;
-  const compTotal = result && result.mc ? result.mc.rounds : 0;
+  const compTotal = result && result.mc ? (result.mc.compRounds || result.mc.rounds) : 0;
   const compEntries = result && result.mc
     ? Object.entries(result.mc.tidCount).sort((a, b) => b[1] - a[1]).map(([tid, n]) => ({
         label: tid === "__floor" ? "레전 깡통 처분" : (targets.find((t) => t.id === tid) || {}).label || tid,
@@ -789,11 +820,24 @@ export default function App() {
                     깡통 처분가({fmtMeso((parseFloat(floorEok) || 0) * 1e8)})가 재설정 지속보다 이득이라, 레전드리 도달 즉시 판매(타겟 뜨면 타겟가)하는 정책으로 계산했어요.
                   </div>
                 )}
+                {sr && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[["single", "단일 라운드"], ["campaign", "천장 소모까지 반복"]].map(([k, lb]) => (
+                      <button key={k} onClick={() => setPityMode(k)} style={{
+                        background: pityMode === k ? "rgba(255,157,77,.15)" : C.panel,
+                        border: `1px solid ${pityMode === k ? C.accent : C.border}`,
+                        color: pityMode === k ? C.accent : C.sub, borderRadius: 8, padding: "6px 14px",
+                        fontSize: 12, fontWeight: pityMode === k ? 700 : 400, cursor: "pointer", fontFamily: "inherit" }}>
+                        {lb}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
                   {[
                     ["재설정 1회당 기대 이득", disp.profit / disp.resets, true],
-                    [sr ? `이번 라운드 기대 순익 (천장 ${result.j0} 반영)` : "라운드당 기대 순익 (장기)", disp.profit, true],
-                    [sr ? "이번 라운드 기대 재설정" : "라운드당 기대 재설정", disp.resets, false],
+                    [sr ? (pm === "campaign" ? "천장 소모까지 기대 순익" : `이번 라운드 기대 순익 (천장 ${result.j0} 반영)`) : "라운드당 기대 순익 (장기)", disp.profit, true],
+                    [sr ? (pm === "campaign" ? "천장 소모까지 기대 재설정" : "이번 라운드 기대 재설정") : "라운드당 기대 재설정", disp.resets, false],
                     ["손익분기 노작 매입가", disp.breakeven, null],
                   ].map(([lb, v, money]) => (
                     <div key={lb} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px" }}>
@@ -807,9 +851,15 @@ export default function App() {
                 </div>
                 {sr ? (
                   <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: C.sub }}>
-                    천장 {result.j0}스택을 반영한 <b style={{ color: C.text }}>단일 라운드 기준</b>입니다 · 장기 평균(스택 평형): 라운드당 <b style={{ color: eng.steady.profit >= 0 ? C.ok : C.danger }}>
-                    {(eng.steady.profit >= 0 ? "+" : "") + fmtMeso(eng.steady.profit)}</b> / {eng.steady.resets.toFixed(1)}회 ·
-                    재진입 비용(매입가+에픽 {eng.epicRolls.toFixed(1)}회): {fmtMeso(eng.reentry)}
+                    {pm === "campaign" ? (
+                      <>천장 {result.j0}스택을 <b style={{ color: C.text }}>레전드리 도달로 소모할 때까지 라운드 반복</b> 기준입니다 ·
+                      기대 매물 수 {result.camp.rounds.toFixed(2)}개 · 장기 평균(스택 평형): 라운드당 <b style={{ color: eng.steady.profit >= 0 ? C.ok : C.danger }}>
+                      {(eng.steady.profit >= 0 ? "+" : "") + fmtMeso(eng.steady.profit)}</b> / {eng.steady.resets.toFixed(1)}회</>
+                    ) : (
+                      <>천장 {result.j0}스택을 반영한 <b style={{ color: C.text }}>단일 라운드 기준</b>입니다 · 장기 평균(스택 평형): 라운드당 <b style={{ color: eng.steady.profit >= 0 ? C.ok : C.danger }}>
+                      {(eng.steady.profit >= 0 ? "+" : "") + fmtMeso(eng.steady.profit)}</b> / {eng.steady.resets.toFixed(1)}회 ·
+                      재진입 비용(매입가+에픽 {eng.epicRolls.toFixed(1)}회): {fmtMeso(eng.reentry)}</>
+                    )}
                   </div>
                 ) : (
                   <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: C.sub }}>
@@ -859,7 +909,7 @@ export default function App() {
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <div style={{ flex: "1 1 260px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
                     <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>
-                      라운드 종료 구성 (시뮬레이션 {result.mc.rounds.toLocaleString()}라운드{sr ? " · 현재 스택 시작" : ""})
+                      라운드 종료 구성 (시뮬레이션 {result.mc.rounds.toLocaleString()}라운드{sr ? (pm === "campaign" ? " · 천장 소모까지" : " · 현재 스택 시작") : ""})
                     </div>
                     {compEntries.map((e) => (
                       <div key={e.label} style={{ marginBottom: 6 }}>
@@ -873,7 +923,7 @@ export default function App() {
                     ))}
                   </div>
                   <div style={{ flex: "1 1 220px", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
-                    <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>라운드 순익 분포 (리스크{sr ? " · 현재 스택 시작" : ""})</div>
+                    <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>라운드 순익 분포 (리스크{sr ? (pm === "campaign" ? " · 천장 소모까지" : " · 현재 스택 시작") : ""})</div>
                     {[["하위 10% (불운)", result.mc.p10], ["중앙값", result.mc.p50], ["상위 10% (행운)", result.mc.p90]].map(([lb, v]) => (
                       <div key={lb} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, padding: "5px 0", borderBottom: `1px solid ${C.border}` }}>
                         <span style={{ color: C.sub }}>{lb}</span>
