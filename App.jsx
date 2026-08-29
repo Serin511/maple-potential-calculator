@@ -5,6 +5,7 @@ import { useState, useMemo, useEffect, useDeferredValue } from "react";
    - 등급업 확률/천장: 넥슨 공식 확률 페이지 (2026.07 확인)
    - 재설정 비용: 나무위키 '잠재능력' 문서 (공식 표 전사본)
    - 옵션 가중치: 나무위키 '잠재능력/옵션 목록' (공식 확률표 분수 변환)
+     + 모자 쿨감 배분은 공식 확률 페이지 값(9:6)으로 보정 (2026.08)
    ================================================================ */
 
 // ---------- 고정 데이터 ----------
@@ -61,7 +62,7 @@ function buildTierAtoms(part, tier, level) {
 
   // 부위 전용 (레전드리)
   if (tier === "legend") {
-    if (part === "hat") { add("CD1", "cd", 7.5, 1); add("CD2", "cd", 7.5, 2); }
+    if (part === "hat") { add("CD1", "cd", 9, 1); add("CD2", "cd", 6, 2); } // 공식: -1초 7.3171%(9/123), -2초 4.8780%(6/123)
     if (part === "glove") add("CRIT", "crit", 12, 8);
     if (part === "acc") { add("DROP", "drop", 9, 1); add("MESO", "meso", 9, 1); }
   }
