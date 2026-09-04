@@ -566,7 +566,7 @@ export default function App() {
     setPresetSel("");
   };
 
-  const thresholds = useMemo(() => (level === 250 ? [17, 20, 23, 24, 26, 27, 30, 33, 36, 39] : [15, 18, 21, 24, 27, 30, 33, 36]), [level]);
+  const thresholds = useMemo(() => (level === 250 ? [17, 20, 21, 23, 24, 26, 27, 30, 33, 36, 39] : [15, 18, 21, 24, 27, 30, 33, 36]), [level]);
   const allThresholds = useMemo(() => (level === 250 ? [18, 21, 24, 27, 30] : [18, 21, 24, 27]), [level]);
   const statMinOpts = level === 250 ? [0, 7, 10, 13, 14, 17, 20, 23, 26] : [0, 6, 9, 12, 18, 21];
 
