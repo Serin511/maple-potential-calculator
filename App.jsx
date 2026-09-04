@@ -6,6 +6,7 @@ import { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
    - 재설정 비용: 나무위키 '잠재능력' 문서 (공식 표 전사본)
    - 옵션 가중치: 나무위키 '잠재능력/옵션 목록' (공식 확률표 분수 변환)
      + 모자 쿨감 배분 9:6, 유니크·레전 HP 가중치 12는 공식 확률 페이지로 보정 (2026.08~09)
+     + 200제 유니크·레전드리 전 부위 공식 크롤 JSON 1,356행 전수 대조 완료 (2026.09)
    ================================================================ */
 
 // ---------- 고정 데이터 ----------
@@ -181,18 +182,52 @@ function targetSatisfied(t, sums) {
   }
 }
 
+// 스탯/HP/올스탯 타겟을 '같은 계열' 구간으로 묶기 — 서로 다른 스탯 간 교차 방지
+function familize(targets) {
+  const fams = {}; const rest = [];
+  for (const t of targets) {
+    const fk = t.kind === "stat" ? "s:" + t.stat : t.kind === "hp" ? "hp" : t.kind === "allsum" ? "all" : null;
+    if (fk) (fams[fk] = fams[fk] || []).push(t); else rest.push(t);
+  }
+  for (const k in fams) fams[k].sort((a, b) => a.min - b.min);
+  return { fams, rest };
+}
+// 3줄 조합 → 표시용 라벨 (동일 구성 합산, 기타=미추적 옵션)
+function comboLabel(a1, a2, a3) {
+  const lab = (a) =>
+    a.kind === "stat" ? `${a.key}+${a.value}%`
+    : a.kind === "all" ? `올스탯+${a.value}%`
+    : a.kind === "hp" ? `HP+${a.value}%`
+    : a.kind === "cd" ? `쿨감-${a.value}초`
+    : a.kind === "crit" ? "크뎀+8%"
+    : a.kind === "drop" ? "드랍" : a.kind === "meso" ? "메획" : "기타";
+  return [a1, a2, a3].map(lab).sort((x, y) => (x === "기타") - (y === "기타") || x.localeCompare(y)).join(" · ");
+}
+
 // 활성 타겟 집합에 대한 등급별 롤 통계
-// q: 판매 확률/회, rev: 수수료 반영 기대수익(판매 조건부), satisf: 타겟별 단독 충족 확률
-function gradeStats(part, level, grade, targets, allstatCount, feeMul) {
+// 스탯 계열은 구간 판정: 매물 수치가 속한 '기준치 이상 ~ 같은 계열의 다음 기준치 미만' 구간의 가격 적용
+// q: 판매 확률/회, rev: 수수료 반영 기대수익(판매 조건부), satisf: 타겟별 구간 도달 확률
+function gradeStats(part, level, grade, targets, allstatCount, feeMul, combosOut) {
+  const { fams, rest } = familize(targets);
   let q = 0, revSum = 0;
   const share = {}, satisf = {}; const cdf = [];
   enumerateRolls(part, level, grade, (p, a1, a2, a3) => {
     const sums = comboSums(a1, a2, a3, allstatCount);
-    let best = null;
-    for (const t of targets) {
-      if (targetSatisfied(t, sums)) {
-        satisf[t.id] = (satisf[t.id] || 0) + p;
-        if (!best || t.price > best.price) best = t;
+    let best = null; const hits = [];
+    for (const fk in fams) {
+      const v = fk === "hp" ? sums.hp : fk === "all" ? sums.allSum : sums.s[fk.slice(2)];
+      let hit = null;
+      for (const t of fams[fk]) { if (v >= t.min) hit = t; else break; }
+      if (hit) hits.push(hit);
+    }
+    for (const t of rest) if (targetSatisfied(t, sums)) hits.push(t);
+    for (const t of hits) {
+      satisf[t.id] = (satisf[t.id] || 0) + p;
+      if (!best || t.price > best.price) best = t;
+      if (combosOut) {
+        const m = combosOut[t.id] || (combosOut[t.id] = {});
+        const key = comboLabel(a1, a2, a3);
+        m[key] = (m[key] || 0) + p;
       }
     }
     if (best) {
@@ -222,12 +257,12 @@ function buildEngine(cfg) {
   for (let k = 1; k <= PITY.epic + 1; k++) epicRolls += Math.pow(1 - pE, k - 1);
   const reentry = itemPrice + epicRolls * Ce; // 판매 후 재진입 비용
 
-  // 등급별 도달 가능성 판별 (단독 충족 확률 기준)
-  const capa = (grade) => {
-    const st = gradeStats(part, level, grade, targets, allstatCount, feeMul);
-    return targets.filter((t) => (st.satisf[t.id] || 0) > 1e-12);
-  };
-  const uCap = capa("unique"), lCap = capa("legend");
+  // 등급별 전체 타겟 구간 확률 + 조합 분해 (판정표 표시용)
+  const uCombos = {}, lCombos = {};
+  const uAll = gradeStats(part, level, "unique", targets, allstatCount, feeMul, uCombos);
+  const lAll = gradeStats(part, level, "legend", targets, allstatCount, feeMul, lCombos);
+  const capaFrom = (st) => targets.filter((t) => (st.satisf[t.id] || 0) > 1e-12);
+  const uCap = capaFrom(uAll), lCap = capaFrom(lAll);
 
   // 유니크 판정: 0.97×판매가 > 재진입 비용
   // (천장은 캐릭터 귀속·이월 → 판매 후 새 매물로 같은 상태에 복귀하므로 카운트와 무관)
@@ -339,6 +374,7 @@ function buildEngine(cfg) {
   return {
     pE, pL, epicRolls, reentry, feeMul,
     uCap, lCap, judgeU, judgeL, activeU, activeL, legMode, legHitFloor,
+    uProb: uAll.satisf, lProb: lAll.satisf, uCombos, lCombos,
     uSt, lSt, round, roundDist,
     steady: { rev: sRev, cost: sCost, resets: sResets, profit: sRev - sCost - itemPrice },
     breakeven: sRev - sCost,
@@ -538,6 +574,7 @@ export default function App() {
   const [presets, setPresets] = useState(() => loadJSON(PRESET_KEY, {}));
   const [presetName, setPresetName] = useState("");
   const [presetSel, setPresetSel] = useState("");
+  const [hoverTid, setHoverTid] = useState(null);
   const applySnapshot = (s) => {
     if (!s) return;
     if (s.level && s.level !== level) skipCostReset.current = true;
@@ -566,7 +603,7 @@ export default function App() {
     setPresetSel("");
   };
 
-  const thresholds = useMemo(() => (level === 250 ? [17, 20, 21, 23, 24, 26, 27, 30, 33, 36, 39] : [15, 18, 21, 24, 27, 30, 33, 36]), [level]);
+  const thresholds = useMemo(() => (level === 250 ? [14, 15, 17, 18, 20, 21, 23, 24, 26, 27, 30, 33, 36, 39] : [12, 15, 18, 21, 24, 27, 30, 33, 36]), [level]);
   const allThresholds = useMemo(() => (level === 250 ? [18, 21, 24, 27, 30] : [18, 21, 24, 27]), [level]);
   const statMinOpts = level === 250 ? [0, 7, 10, 13, 14, 17, 20, 23, 26] : [0, 6, 9, 12, 18, 21];
 
@@ -604,6 +641,16 @@ export default function App() {
         const p = num(accPrices[k]);
         if (p) list.push({ id: `dm_${k}`, kind: "dm", combo: k, price: p, label: labels[k] });
       }
+    }
+    // 스탯 계열 라벨을 구간 표기로 변환 (같은 계열의 다음 입력 기준치 미만)
+    const famKey = (t) => t.kind === "stat" ? "s:" + t.stat : t.kind === "hp" ? "hp" : t.kind === "allsum" ? "all" : null;
+    const byFam = {};
+    list.forEach((t) => { const k = famKey(t); if (k) (byFam[k] = byFam[k] || []).push(t); });
+    for (const k in byFam) {
+      byFam[k].sort((a, b) => a.min - b.min);
+      byFam[k].forEach((t, i, arr) => {
+        if (arr[i + 1]) t.label = t.label.replace(`${t.min}%↑`, `${t.min}~${arr[i + 1].min - 1}%`);
+      });
     }
     return list;
   }, [part, thresholds, allThresholds, statPrices, hatRows, gloveRows, accPrices]);
@@ -819,7 +866,7 @@ export default function App() {
                   </table>
                 </div>
                 <div style={{ fontSize: 11, color: C.sub, marginTop: 6 }}>
-                  합계 ≥ 기준이면 판매(가장 높은 기준의 가격 적용) · MaxHP엔 올스탯 미합산 ·
+                  매물 수치가 속한 구간(기준치 이상 ~ 같은 행의 다음 입력 기준치 미만)의 가격으로 판매 · 여러 행 동시 충족 시 최고가 적용 · MaxHP엔 올스탯 미합산 ·
                   올스탯 행은 올스탯% 줄만의 합계(제논용, 단일 스탯 줄 미포함)이라 기준치가 달라요
                 </div>
               </div>
@@ -953,7 +1000,7 @@ export default function App() {
                 )}
 
                 {/* 타겟 판정 */}
-                <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+                <div onMouseLeave={() => setHoverTid(null)} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
                   <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>타겟별 판매/홀드 판정</div>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead><tr style={{ color: C.sub }}>
@@ -965,17 +1012,23 @@ export default function App() {
                     <tbody>
                       {targets.map((t) => {
                         const j = judgedMap[t.id] || {};
+                        const up = eng.uProb[t.id] || 0, lp = eng.lProb[t.id] || 0;
                         return (
-                          <tr key={t.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                          <tr key={t.id} onMouseEnter={() => setHoverTid(t.id)}
+                            onClick={() => setHoverTid(hoverTid === t.id ? null : t.id)}
+                            style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer",
+                              background: hoverTid === t.id ? C.panel2 : "transparent" }}>
                             <td style={{ padding: "6px" }}>{t.label}</td>
                             <td style={{ padding: "6px", textAlign: "right", color: C.sub }}>{fmtMeso(t.price)}</td>
                             <td style={{ padding: "6px", textAlign: "center" }}>
                               {j.u === null || j.u === undefined ? <Badge kind="na">도달 불가</Badge>
                                 : j.u ? <Badge kind="sell">판매</Badge> : <Badge kind="hold">홀드 · 재설정 이득</Badge>}
+                              <div style={{ fontSize: 10, color: C.sub, marginTop: 3 }}>{up > 1e-12 ? fmtPct(up) + "/회" : "—"}</div>
                             </td>
                             <td style={{ padding: "6px", textAlign: "center" }}>
                               {j.l === null || j.l === undefined ? <Badge kind="na">도달 불가</Badge>
                                 : j.l ? <Badge kind="sell">판매</Badge> : <Badge kind="hold">홀드 · 상위 노리기</Badge>}
+                              <div style={{ fontSize: 10, color: C.sub, marginTop: 3 }}>{lp > 1e-12 ? fmtPct(lp) + "/회" : "—"}</div>
                             </td>
                           </tr>
                         );
@@ -983,9 +1036,44 @@ export default function App() {
                     </tbody>
                   </table>
                   <div style={{ fontSize: 11, color: C.sub, marginTop: 8 }}>
+                    각 셀 아래 %는 해당 구간 도달 확률/회 · 행에 마우스를 올리면(또는 탭하면) 도달 가능한 옵션 조합별 확률을 보여줘요 ·
                     유니크 판정 기준: 0.97×판매가 &gt; 매입가+에픽구간 비용({fmtMeso(eng.reentry)}) — 천장은 캐릭터 귀속이라 팔아도 이월되므로 카운트와 무관 ·
                     레전드리 판정: 계속 재설정 시 기대 수익과 비교(최적 정지)
                   </div>
+                  {hoverTid && (() => {
+                    const t = targets.find((x) => x.id === hoverTid);
+                    if (!t) return null;
+                    const renderCombos = (m) => {
+                      const es = Object.entries(m || {}).sort((a, b) => b[1] - a[1]);
+                      if (!es.length) return <div style={{ fontSize: 11, color: C.sub }}>도달 조합 없음</div>;
+                      const top = es.slice(0, 14); const restP = es.slice(14).reduce((s, [, p]) => s + p, 0);
+                      return (
+                        <>
+                          {top.map(([k, p]) => (
+                            <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, padding: "2px 0" }}>
+                              <span>{k}</span><span style={{ color: C.sub, whiteSpace: "nowrap" }}>{fmtPct(p)}</span>
+                            </div>
+                          ))}
+                          {restP > 0 && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>외 {es.length - 14}개 조합 — {fmtPct(restP)}</div>}
+                        </>
+                      );
+                    };
+                    return (
+                      <div style={{ marginTop: 10, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{t.label} — 구간 도달 조합 (기타 = 미추적 옵션 아무거나)</div>
+                        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                          <div style={{ flex: "1 1 240px" }}>
+                            <div style={{ fontSize: 11, color: C.unique, fontWeight: 700, marginBottom: 4 }}>유니크 재설정 시 · 합 {fmtPct(eng.uProb[t.id] || 0)}</div>
+                            {renderCombos(eng.uCombos[t.id])}
+                          </div>
+                          <div style={{ flex: "1 1 240px" }}>
+                            <div style={{ fontSize: 11, color: C.legend, fontWeight: 700, marginBottom: 4 }}>레전드리 재설정 시 · 합 {fmtPct(eng.lProb[t.id] || 0)}</div>
+                            {renderCombos(eng.lCombos[t.id])}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 {/* 판매 구성 + 리스크 */}
