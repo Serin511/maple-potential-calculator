@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useDeferredValue } from "react";
+import { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
 
 /* ================================================================
    메이플스토리 잠재능력 재설정 장사 계산기
@@ -436,6 +436,23 @@ const fmtMeso = (n) => {
 };
 const fmtPct = (p) => (p * 100 < 0.01 && p > 0 ? "<0.01%" : (p * 100).toLocaleString("ko-KR", { maximumFractionDigits: 2 }) + "%");
 
+// ---------- 로컬 저장 (브라우저별 영구 저장 · 차단 환경에선 메모리 폴백) ----------
+const storage = (() => {
+  try {
+    const s = window.localStorage; const k = "__mpc_test";
+    s.setItem(k, "1"); s.removeItem(k);
+    return s;
+  } catch {
+    const m = {};
+    return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); }, removeItem: (k) => { delete m[k]; } };
+  }
+})();
+const SAVE_KEY = "mpc:auto:v1";
+const PRESET_KEY = "mpc:presets:v1";
+const loadJSON = (k, fb) => { try { const v = JSON.parse(storage.getItem(k) || "null"); return v ?? fb; } catch { return fb; } };
+const saveJSON = (k, v) => { try { storage.setItem(k, JSON.stringify(v)); } catch {} };
+const _saved = loadJSON(SAVE_KEY, null);
+
 // ---------- UI ----------
 const C = {
   bg: "#12151b", panel: "#1a1f27", panel2: "#20262f", border: "#2c3440",
@@ -472,23 +489,29 @@ const Badge = ({ kind, children }) => (
 );
 
 export default function App() {
-  const [level, setLevel] = useState(200);
-  const [part, setPart] = useState("acc");
-  const [itemPriceEok, setItemPriceEok] = useState("3");
-  const [fee, setFee] = useState("3");
-  const [pity, setPity] = useState("0");
-  const [floorEok, setFloorEok] = useState("1.5");
-  const [miracle, setMiracle] = useState(false);
-  const [autoExclude, setAutoExclude] = useState(true);
-  const [allstatCount, setAllstatCount] = useState(true);
-  const [costs, setCosts] = useState({ ...COST_DEFAULT[200] });
-  const [statPrices, setStatPrices] = useState({});
-  const [hatRows, setHatRows] = useState([{ cd: 2, statMin: 12, stat: "STR", price: "" }, { cd: 3, statMin: 0, stat: "STR", price: "" }, { cd: 4, statMin: 0, stat: "STR", price: "" }]);
-  const [gloveRows, setGloveRows] = useState([{ crit: 8, statMin: 12, stat: "STR", price: "" }, { crit: 16, statMin: 0, stat: "STR", price: "" }, { crit: 24, statMin: 0, stat: "STR", price: "" }]);
-  const [accPrices, setAccPrices] = useState({ drop2: "", meso2: "", dropmeso: "", dm3: "" });
-  const [pityMode, setPityMode] = useState("single"); // 스택>0 표시 모드: single | campaign
+  const [level, setLevel] = useState(_saved?.level ?? 200);
+  const [part, setPart] = useState(_saved?.part ?? "acc");
+  const [itemPriceEok, setItemPriceEok] = useState(_saved?.itemPriceEok ?? "3");
+  const [fee, setFee] = useState(_saved?.fee ?? "3");
+  const [pity, setPity] = useState(_saved?.pity ?? "0");
+  const [floorEok, setFloorEok] = useState(_saved?.floorEok ?? "1.5");
+  const [miracle, setMiracle] = useState(!!_saved?.miracle);
+  const [autoExclude, setAutoExclude] = useState(_saved ? _saved.autoExclude !== false : true);
+  const [allstatCount, setAllstatCount] = useState(_saved ? _saved.allstatCount !== false : true);
+  const [costs, setCosts] = useState(_saved?.costs ?? { ...COST_DEFAULT[_saved?.level ?? 200] });
+  const [statPrices, setStatPrices] = useState(_saved?.statPrices ?? {});
+  const [hatRows, setHatRows] = useState(_saved?.hatRows?.length ? _saved.hatRows : [{ cd: 2, statMin: 12, stat: "STR", price: "" }, { cd: 3, statMin: 0, stat: "STR", price: "" }, { cd: 4, statMin: 0, stat: "STR", price: "" }]);
+  const [gloveRows, setGloveRows] = useState(_saved?.gloveRows?.length ? _saved.gloveRows : [{ crit: 8, statMin: 12, stat: "STR", price: "" }, { crit: 16, statMin: 0, stat: "STR", price: "" }, { crit: 24, statMin: 0, stat: "STR", price: "" }]);
+  const [accPrices, setAccPrices] = useState(_saved?.accPrices ?? { drop2: "", meso2: "", dropmeso: "", dm3: "" });
+  const [pityMode, setPityMode] = useState(_saved?.pityMode ?? "single"); // 스택>0 표시 모드: single | campaign
 
-  useEffect(() => { setCosts({ ...COST_DEFAULT[level] }); }, [level]);
+  const firstLevelRun = useRef(true);
+  const skipCostReset = useRef(false);
+  useEffect(() => {
+    if (firstLevelRun.current) { firstLevelRun.current = false; return; } // 마운트 시 복원값 보존
+    if (skipCostReset.current) { skipCostReset.current = false; return; } // 프리셋 적용 시 보존
+    setCosts({ ...COST_DEFAULT[level] });
+  }, [level]);
 
   const [resetArm, setResetArm] = useState(false);
   useEffect(() => {
@@ -503,6 +526,44 @@ export default function App() {
     setHatRows((rows) => rows.map((r) => ({ ...r, price: "" })));
     setGloveRows((rows) => rows.map((r) => ({ ...r, price: "" })));
     setResetArm(false);
+  };
+
+  // ---------- 자동 저장 & 프리셋 ----------
+  const snap = () => ({ level, part, itemPriceEok, fee, pity, floorEok, miracle, autoExclude, allstatCount, costs, statPrices, hatRows, gloveRows, accPrices, pityMode });
+  useEffect(() => {
+    const t = setTimeout(() => saveJSON(SAVE_KEY, snap()), 400);
+    return () => clearTimeout(t);
+  }, [level, part, itemPriceEok, fee, pity, floorEok, miracle, autoExclude, allstatCount, costs, statPrices, hatRows, gloveRows, accPrices, pityMode]);
+
+  const [presets, setPresets] = useState(() => loadJSON(PRESET_KEY, {}));
+  const [presetName, setPresetName] = useState("");
+  const [presetSel, setPresetSel] = useState("");
+  const applySnapshot = (s) => {
+    if (!s) return;
+    if (s.level && s.level !== level) skipCostReset.current = true;
+    if (s.level) setLevel(s.level);
+    if (s.part) setPart(s.part);
+    setItemPriceEok(s.itemPriceEok ?? "3"); setFee(s.fee ?? "3"); setPity(s.pity ?? "0"); setFloorEok(s.floorEok ?? "1.5");
+    setMiracle(!!s.miracle); setAutoExclude(s.autoExclude !== false); setAllstatCount(s.allstatCount !== false);
+    setCosts(s.costs ?? { ...COST_DEFAULT[s.level ?? 200] });
+    setStatPrices(s.statPrices ?? {});
+    if (s.hatRows?.length) setHatRows(s.hatRows);
+    if (s.gloveRows?.length) setGloveRows(s.gloveRows);
+    setAccPrices(s.accPrices ?? { drop2: "", meso2: "", dropmeso: "", dm3: "" });
+    if (s.pityMode) setPityMode(s.pityMode);
+  };
+  const savePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const next = { ...presets, [name]: snap() };
+    setPresets(next); saveJSON(PRESET_KEY, next);
+    setPresetSel(name); setPresetName("");
+  };
+  const deletePreset = () => {
+    if (!presetSel) return;
+    const next = { ...presets }; delete next[presetSel];
+    setPresets(next); saveJSON(PRESET_KEY, next);
+    setPresetSel("");
   };
 
   const thresholds = useMemo(() => (level === 250 ? [23, 26, 30, 33, 36, 39] : [21, 24, 27, 30, 33, 36]), [level]);
@@ -667,6 +728,27 @@ export default function App() {
               <Toggle on={miracle} set={setMiracle} label="미라클데이 (등급업 확률 ×2)" color="#f2c744" />
               <Toggle on={autoExclude} set={setAutoExclude} label="홀드 판정 타겟 자동 제외 (최적 정책)" />
               <Toggle on={allstatCount} set={setAllstatCount} label="올스탯 줄을 스탯 합산에 포함" />
+            </div>
+            <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em" }}>프리셋</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={presetName} placeholder="프리셋 이름" onChange={(e) => setPresetName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && savePreset()} style={{ ...inputStyle, flex: 1 }} />
+                <button onClick={savePreset} disabled={!presetName.trim()} style={{
+                  ...inputStyle, width: "auto", cursor: presetName.trim() ? "pointer" : "default",
+                  color: presetName.trim() ? C.accent : C.sub, whiteSpace: "nowrap" }}>현재 입력 저장</button>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <select value={presetSel} onChange={(e) => { setPresetSel(e.target.value); if (e.target.value) applySnapshot(presets[e.target.value]); }}
+                  style={{ ...inputStyle, flex: 1 }}>
+                  <option value="">{Object.keys(presets).length ? "프리셋 선택 → 즉시 적용" : "저장된 프리셋 없음"}</option>
+                  {Object.keys(presets).map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+                <button onClick={deletePreset} disabled={!presetSel} style={{
+                  ...inputStyle, width: "auto", cursor: presetSel ? "pointer" : "default",
+                  color: presetSel ? C.danger : C.sub, whiteSpace: "nowrap" }}>삭제</button>
+              </div>
+              <div style={{ fontSize: 11, color: C.sub }}>입력값은 이 브라우저에 자동 저장돼요 (새로고침해도 유지)</div>
             </div>
             <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
               <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em" }}>재설정 비용 (메소, 수정 가능)</div>
