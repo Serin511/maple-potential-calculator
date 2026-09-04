@@ -507,7 +507,7 @@ export default function App() {
 
   const thresholds = useMemo(() => (level === 250 ? [23, 26, 30, 33, 36, 39] : [21, 24, 27, 30, 33, 36]), [level]);
   const allThresholds = useMemo(() => (level === 250 ? [18, 21, 24, 27, 30] : [18, 21, 24, 27]), [level]);
-  const statMinOpts = level === 250 ? [0, 7, 10, 13, 17, 20, 23, 26] : [0, 6, 9, 12, 18, 21];
+  const statMinOpts = level === 250 ? [0, 7, 10, 13, 14, 17, 20, 23, 26] : [0, 6, 9, 12, 18, 21];
 
   // 타겟 목록 구성
   const targets = useMemo(() => {
