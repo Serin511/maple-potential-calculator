@@ -5,7 +5,7 @@ import { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
    - 등급업 확률/천장: 넥슨 공식 확률 페이지 (2026.07 확인)
    - 재설정 비용: 나무위키 '잠재능력' 문서 (공식 표 전사본)
    - 옵션 가중치: 나무위키 '잠재능력/옵션 목록' (공식 확률표 분수 변환)
-     + 모자 쿨감 배분은 공식 확률 페이지 값(9:6)으로 보정 (2026.08)
+     + 모자 쿨감 배분 9:6, 유니크·레전 HP 가중치 12는 공식 확률 페이지로 보정 (2026.08~09)
    ================================================================ */
 
 // ---------- 고정 데이터 ----------
@@ -58,7 +58,7 @@ function buildTierAtoms(part, tier, level) {
   const sw = tier === "epic" ? 10 : tier === "unique" ? 10 : 12;
   STATS.forEach((s) => add(s, "stat", sw, v.stat[tier]));
   add("ALL", "all", tier === "epic" ? 4 : tier === "unique" ? 8 : 9, v.all[tier]);
-  add("HP", "hp", tier === "epic" ? 10 : tier === "unique" ? 12 : 9, v.stat[tier]);
+  add("HP", "hp", tier === "epic" ? 10 : 12, v.stat[tier]); // 공식: 유니크·레전드리 HP 가중치 12 (2026.09 공식 표 대조)
 
   // 부위 전용 (레전드리)
   if (tier === "legend") {
