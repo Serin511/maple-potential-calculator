@@ -6,7 +6,7 @@ import { useState, useMemo, useEffect, useRef, useDeferredValue } from "react";
    - 재설정 비용: 나무위키 '잠재능력' 문서 (공식 표 전사본)
    - 옵션 가중치: 나무위키 '잠재능력/옵션 목록' (공식 확률표 분수 변환)
      + 모자 쿨감 배분 9:6, 유니크·레전 HP 가중치 12는 공식 확률 페이지로 보정 (2026.08~09)
-     + 200제 유니크·레전드리 전 부위 공식 크롤 JSON 1,356행 전수 대조 완료 (2026.09)
+     + 200제 유니크·레전드리 전 부위 공식 크롤 JSON 1,356행 전수 대조 통과 (2026.09)
    ================================================================ */
 
 // ---------- 고정 데이터 ----------
@@ -575,6 +575,7 @@ export default function App() {
   const [presetName, setPresetName] = useState("");
   const [presetSel, setPresetSel] = useState("");
   const [hoverTid, setHoverTid] = useState(null);
+  const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
   const applySnapshot = (s) => {
     if (!s) return;
     if (s.level && s.level !== level) skipCostReset.current = true;
@@ -1014,8 +1015,8 @@ export default function App() {
                         const j = judgedMap[t.id] || {};
                         const up = eng.uProb[t.id] || 0, lp = eng.lProb[t.id] || 0;
                         return (
-                          <tr key={t.id} onMouseEnter={() => setHoverTid(t.id)}
-                            onClick={() => setHoverTid(hoverTid === t.id ? null : t.id)}
+                          <tr key={t.id} onMouseEnter={(e) => { setHoverTid(t.id); setHoverPos({ x: e.clientX, y: e.clientY }); }}
+                            onClick={(e) => { setHoverPos({ x: e.clientX, y: e.clientY }); setHoverTid(hoverTid === t.id ? null : t.id); }}
                             style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer",
                               background: hoverTid === t.id ? C.panel2 : "transparent" }}>
                             <td style={{ padding: "6px" }}>{t.label}</td>
@@ -1046,7 +1047,7 @@ export default function App() {
                     const renderCombos = (m) => {
                       const es = Object.entries(m || {}).sort((a, b) => b[1] - a[1]);
                       if (!es.length) return <div style={{ fontSize: 11, color: C.sub }}>도달 조합 없음</div>;
-                      const top = es.slice(0, 14); const restP = es.slice(14).reduce((s, [, p]) => s + p, 0);
+                      const top = es.slice(0, 12); const restP = es.slice(12).reduce((s, [, p]) => s + p, 0);
                       return (
                         <>
                           {top.map(([k, p]) => (
@@ -1054,19 +1055,29 @@ export default function App() {
                               <span>{k}</span><span style={{ color: C.sub, whiteSpace: "nowrap" }}>{fmtPct(p)}</span>
                             </div>
                           ))}
-                          {restP > 0 && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>외 {es.length - 14}개 조합 — {fmtPct(restP)}</div>}
+                          {restP > 0 && <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>외 {es.length - 12}개 조합 — {fmtPct(restP)}</div>}
                         </>
                       );
                     };
+                    const vw = typeof window !== "undefined" ? window.innerWidth : 800;
+                    const vh = typeof window !== "undefined" ? window.innerHeight : 600;
+                    const W = Math.min(520, vw - 16);
+                    const left = Math.max(8, Math.min(hoverPos.x + 16, vw - W - 8));
+                    const below = vh - hoverPos.y > 360;
                     return (
-                      <div style={{ marginTop: 10, background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12 }}>
+                      <div style={{
+                        position: "fixed", zIndex: 50, width: W, left, pointerEvents: "none",
+                        ...(below ? { top: hoverPos.y + 16 } : { bottom: vh - hoverPos.y + 12 }),
+                        maxHeight: below ? vh - hoverPos.y - 24 : hoverPos.y - 20, overflow: "hidden",
+                        background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12,
+                        boxShadow: "0 8px 24px rgba(0,0,0,.5)" }}>
                         <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{t.label} — 구간 도달 조합 (기타 = 미추적 옵션 아무거나)</div>
                         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-                          <div style={{ flex: "1 1 240px" }}>
+                          <div style={{ flex: "1 1 220px" }}>
                             <div style={{ fontSize: 11, color: C.unique, fontWeight: 700, marginBottom: 4 }}>유니크 재설정 시 · 합 {fmtPct(eng.uProb[t.id] || 0)}</div>
                             {renderCombos(eng.uCombos[t.id])}
                           </div>
-                          <div style={{ flex: "1 1 240px" }}>
+                          <div style={{ flex: "1 1 220px" }}>
                             <div style={{ fontSize: 11, color: C.legend, fontWeight: 700, marginBottom: 4 }}>레전드리 재설정 시 · 합 {fmtPct(eng.lProb[t.id] || 0)}</div>
                             {renderCombos(eng.lCombos[t.id])}
                           </div>
