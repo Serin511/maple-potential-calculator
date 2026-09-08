@@ -245,17 +245,20 @@ function gradeStats(part, level, grade, targets, allstatCount, feeMul, combosOut
 }
 
 // ---------- 라운드 해석 엔진 (천장 이월 마르코프) ----------
-function buildEngine(cfg) {
+// gShift: 재설정 1회의 기회비용(장기 회당 기대 이득). 판정(판매/홀드·최적 정지)에만 반영, 실제 비용 계산엔 미반영
+function buildEngine(cfg, gShift = 0) {
   const { part, level, targetsU, targetsL, allstatCount, fee, miracle, costs, itemPrice, floorPrice, autoExclude } = cfg;
   const feeMul = 1 - fee / 100;
   const pE = Math.min(1, GRADE_UP.epic * (miracle ? 2 : 1));
   const pL = Math.min(1, GRADE_UP.unique * (miracle ? 2 : 1));
   const Ce = costs.epic, Cu = costs.unique, Cl = costs.legend;
+  const g = Math.max(0, gShift);
 
   // 에픽 구간 기대 재설정 횟수 (42스택 도달 시 다음 재설정 확정 → 최대 43회)
   let epicRolls = 0;
   for (let k = 1; k <= PITY.epic + 1; k++) epicRolls += Math.pow(1 - pE, k - 1);
-  const reentry = itemPrice + epicRolls * Ce; // 판매 후 재진입 비용
+  const reentry = itemPrice + epicRolls * Ce;            // 판매 후 재진입 비용 (실비)
+  const reentryEff = itemPrice + epicRolls * (Ce + g);   // 판정용: 에픽 구간 재설정의 기회비용 포함
 
   // 등급별 전체 타겟 구간 확률 + 조합 분해 (판정표 표시용) — 유니크/레전드리 가격·타겟 집합 분리
   const uCombos = {}, lCombos = {};
@@ -264,15 +267,15 @@ function buildEngine(cfg) {
   const capaFrom = (st, list) => list.filter((t) => (st.satisf[t.id] || 0) > 1e-12);
   const uCap = capaFrom(uAll, targetsU), lCap = capaFrom(lAll, targetsL);
 
-  // 유니크 판정: 0.97×판매가 > 재진입 비용
-  // (천장은 캐릭터 귀속·이월 → 판매 후 새 매물로 같은 상태에 복귀하므로 카운트와 무관)
+  // 유니크 판정: 0.97×판매가 > 재진입 비용 + 에픽 구간 재설정 기회비용
+  // (천장은 캐릭터 귀속·이월 → 판매 후 새 매물로 같은 상태에 복귀. 단, 그 사이 에픽 재설정 ~22회는 다른 매물에 썼다면 g/회씩 벌었을 시간)
   const judgeU = {};
-  uCap.forEach((t) => (judgeU[t.id] = t.price * feeMul > reentry));
+  uCap.forEach((t) => (judgeU[t.id] = t.price * feeMul > reentryEff));
 
   // 레전드리 판정: 최적 정지 그리디 (깡통 처분가도 후보로 포함)
-  // V(S) = 활성 집합 S를 향해 계속 재설정할 때의 기대 순수익
-  //  - S에 깡통 포함 → 모든 롤이 판매됨: V = 1회 롤 기대 수익 (추가 비용 없음)
-  //  - 미포함 → V = E[수익|판매] − C_leg / q(S)
+  // V(S) = 활성 집합 S를 향해 계속 재설정할 때의 기대 순수익 (한 번 더 돌리는 비용 = 큐브값 + 기회비용 g)
+  //  - S에 깡통 포함 → 다음 롤이 무조건 판매됨: V = 다음 롤 기대 판매가 − (C_leg + g)
+  //  - 미포함 → V = E[수익|판매] − (C_leg + g) / q(S)
   const lCands = [...lCap];
   if (floorPrice > 0) lCands.push({ id: "__floor", kind: "floor", price: floorPrice, label: "깡통 처분" });
   lCands.sort((a, b) => b.price - a.price);
@@ -281,10 +284,10 @@ function buildEngine(cfg) {
   const contValue = (S) => {
     const real = S.filter((x) => x.kind !== "floor");
     const hasFloor = S.some((x) => x.kind === "floor");
-    if (real.length === 0) return hasFloor ? floorPrice * feeMul : -Infinity;
+    if (real.length === 0) return hasFloor ? floorPrice * feeMul - (Cl + g) : -Infinity;
     const st = gradeStats(part, level, "legend", real, allstatCount, feeMul);
-    if (hasFloor) return st.q * st.rev + (1 - st.q) * floorPrice * feeMul;
-    return st.q > 1e-12 ? st.rev - Cl / st.q : -Infinity;
+    if (hasFloor) return st.q * st.rev + (1 - st.q) * floorPrice * feeMul - (Cl + g);
+    return st.q > 1e-12 ? st.rev - (Cl + g) / st.q : -Infinity;
   };
   if (lCands.length > 0) {
     accepted = [lCands[0]];
@@ -372,13 +375,27 @@ function buildEngine(cfg) {
     sRev += pi[j] * r.rev; sCost += pi[j] * r.cost; sResets += pi[j] * r.resets;
   }
   return {
-    pE, pL, epicRolls, reentry, feeMul,
+    pE, pL, epicRolls, reentry, reentryEff, gShift: g, feeMul,
     uCap, lCap, judgeU, judgeL, activeU, activeL, legMode, legHitFloor,
     uProb: uAll.satisf, lProb: lAll.satisf, uCombos, lCombos,
     uSt, lSt, round, roundDist,
     steady: { rev: sRev, cost: sCost, resets: sResets, profit: sRev - sCost - itemPrice },
     breakeven: sRev - sCost,
   };
+}
+
+// 재설정 1회당 기대 이득 g를 최대화하는 정책 탐색 (Dinkelbach 고정점 반복)
+//  판정은 g를 기회비용으로 쓰고, 그 판정으로 계산한 g가 다시 판정을 바꾸므로 수렴할 때까지 반복. 최고 g 정책 채택
+function solveEngine(cfg) {
+  let g = 0, best = null;
+  for (let i = 0; i < 12; i++) {
+    const eng = buildEngine(cfg, g);
+    const gNew = eng.steady.resets > 1e-9 ? eng.steady.profit / eng.steady.resets : 0;
+    if (!best || gNew > best.steady.profit / best.steady.resets + 1e-6) best = eng;
+    if (Math.abs(gNew - g) < 1e4 || !cfg.autoExclude) break; // 1만 메소/회 이하 변화면 수렴
+    g = gNew;
+  }
+  return best;
 }
 
 // ---------- 몬테카를로 (분포·구성비) ----------
@@ -696,7 +713,7 @@ export default function App() {
         itemPrice: (parseFloat(dcfg.itemPriceEok) || 0) * 1e8,
         floorPrice: (parseFloat(dcfg.floorEok) || 0) * 1e8,
       };
-      const eng = buildEngine(cfg);
+      const eng = solveEngine(cfg);
       const j0 = Math.max(0, Math.min(PITY.unique, parseInt(dcfg.pity) || 0));
       const first = eng.round(j0);
       const singleRound = j0 > 0; // 천장 스택 보유 시 단일/캠페인 기준 표시
@@ -1080,8 +1097,9 @@ export default function App() {
                   </table>
                   <div style={{ fontSize: 11, color: C.sub, marginTop: 8 }}>
                     구간은 등급별 입력 기준치 기준 · 확률은 해당 구간 도달 확률/회 · 행에 마우스를 올리면(또는 탭하면) 도달 가능한 옵션 조합별 확률을 보여줘요 ·
-                    유니크 판정 기준: 0.97×판매가 &gt; 매입가+에픽구간 비용({fmtMeso(eng.reentry)}) — 천장은 캐릭터 귀속이라 팔아도 이월되므로 카운트와 무관 ·
-                    레전드리 판정: 계속 재설정 시 기대 수익과 비교(최적 정지)
+                    유니크 판정 기준: 0.97×판매가 &gt; 재진입 비용 {fmtMeso(eng.reentry)} + 에픽 구간 재설정 {eng.epicRolls.toFixed(1)}회의 기회비용(회당 {fmtMeso(eng.gShift)}) = <b style={{ color: C.text }}>{fmtMeso(eng.reentryEff)}</b> —
+                    천장은 캐릭터 귀속이라 팔아도 이월되지만, 팔고 다시 올라오는 동안의 재설정은 다른 매물에 썼다면 벌었을 시간이라 비용으로 칩니다 ·
+                    레전드리 판정: 계속 재설정 시 기대 수익(큐브값+기회비용 반영)과 비교(최적 정지) · 자동 제외 정책은 재설정 1회당 기대 이득이 최대가 되는 고정점으로 수렴시킨 결과예요
                   </div>
                   {hoverTid && byId[hoverTid] && (() => {
                     const row = byId[hoverTid];
