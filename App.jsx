@@ -246,7 +246,7 @@ function gradeStats(part, level, grade, targets, allstatCount, feeMul, combosOut
 
 // ---------- 라운드 해석 엔진 (천장 이월 마르코프) ----------
 function buildEngine(cfg) {
-  const { part, level, targets, allstatCount, fee, miracle, costs, itemPrice, floorPrice, autoExclude } = cfg;
+  const { part, level, targetsU, targetsL, allstatCount, fee, miracle, costs, itemPrice, floorPrice, autoExclude } = cfg;
   const feeMul = 1 - fee / 100;
   const pE = Math.min(1, GRADE_UP.epic * (miracle ? 2 : 1));
   const pL = Math.min(1, GRADE_UP.unique * (miracle ? 2 : 1));
@@ -257,12 +257,12 @@ function buildEngine(cfg) {
   for (let k = 1; k <= PITY.epic + 1; k++) epicRolls += Math.pow(1 - pE, k - 1);
   const reentry = itemPrice + epicRolls * Ce; // 판매 후 재진입 비용
 
-  // 등급별 전체 타겟 구간 확률 + 조합 분해 (판정표 표시용)
+  // 등급별 전체 타겟 구간 확률 + 조합 분해 (판정표 표시용) — 유니크/레전드리 가격·타겟 집합 분리
   const uCombos = {}, lCombos = {};
-  const uAll = gradeStats(part, level, "unique", targets, allstatCount, feeMul, uCombos);
-  const lAll = gradeStats(part, level, "legend", targets, allstatCount, feeMul, lCombos);
-  const capaFrom = (st) => targets.filter((t) => (st.satisf[t.id] || 0) > 1e-12);
-  const uCap = capaFrom(uAll), lCap = capaFrom(lAll);
+  const uAll = gradeStats(part, level, "unique", targetsU, allstatCount, feeMul, uCombos);
+  const lAll = gradeStats(part, level, "legend", targetsL, allstatCount, feeMul, lCombos);
+  const capaFrom = (st, list) => list.filter((t) => (st.satisf[t.id] || 0) > 1e-12);
+  const uCap = capaFrom(uAll, targetsU), lCap = capaFrom(lAll, targetsL);
 
   // 유니크 판정: 0.97×판매가 > 재진입 비용
   // (천장은 캐릭터 귀속·이월 → 판매 후 새 매물로 같은 상태에 복귀하므로 카운트와 무관)
@@ -409,7 +409,7 @@ function runMC(eng, cfg, startJ, samples, mode = "chain") {
       let cost = itemPrice, resets = 0, rev = 0, tid = null;
       for (let k = 1; k <= PITY.epic + 1; k++) { resets++; cost += costs.epic; if (k === PITY.epic + 1 || rnd() < eng.pE) break; }
       let done = false;
-      if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
+      if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = "u|" + s.tid; done = true; }
       while (!done) {
         const up = j >= PITY.unique ? true : rnd() < eng.pL;
         resets++; cost += costs.unique;
@@ -418,16 +418,16 @@ function runMC(eng, cfg, startJ, samples, mode = "chain") {
           if (eng.legMode === "A") { rev = floorPrice * eng.feeMul; tid = "__floor"; }
           else if (eng.legMode === "C") {
             // 매 롤이 판매 조건: 승급 롤에서 타겟 or 깡통가로 즉시 판매
-            if (rnd() < eng.lSt.q) { const s = sample(eng.lSt.cum, 0); rev = s.rev; tid = s.tid; }
+            if (rnd() < eng.lSt.q) { const s = sample(eng.lSt.cum, 0); rev = s.rev; tid = "l|" + s.tid; }
             else { rev = floorPrice * eng.feeMul; tid = "__floor"; }
           } else {
             if (rnd() >= eng.lSt.q) { do { resets++; cost += costs.legend; } while (rnd() >= eng.lSt.q); }
-            const s = sample(eng.lSt.cum, floorPrice * eng.feeMul); rev = s.rev; tid = s.tid;
+            const s = sample(eng.lSt.cum, floorPrice * eng.feeMul); rev = s.rev; tid = s.tid === "__floor" ? "__floor" : "l|" + s.tid;
           }
           done = true;
         } else {
           j++;
-          if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = s.tid; done = true; }
+          if (rnd() < eng.uSt.q) { const s = sample(eng.uSt.cum, 0); rev = s.rev; tid = "u|" + s.tid; done = true; }
         }
       }
       acc += rev - cost; accResets += resets; totRounds++;
@@ -488,6 +488,15 @@ const PRESET_KEY = "mpc:presets:v1";
 const loadJSON = (k, fb) => { try { const v = JSON.parse(storage.getItem(k) || "null"); return v ?? fb; } catch { return fb; } };
 const saveJSON = (k, v) => { try { storage.setItem(k, JSON.stringify(v)); } catch {} };
 const _saved = loadJSON(SAVE_KEY, null);
+// 판매가 키: "u:INT_24"(유니크) / "l:INT_24"(레전드리). 구버전 무접두 키는 양쪽에 복사
+const migratePrices = (sp) => {
+  const out = {};
+  for (const k in sp || {}) {
+    if (k.startsWith("u:") || k.startsWith("l:")) out[k] = sp[k];
+    else { out["u:" + k] = sp[k]; out["l:" + k] = sp[k]; }
+  }
+  return out;
+};
 
 // ---------- UI ----------
 const C = {
@@ -535,7 +544,7 @@ export default function App() {
   const [autoExclude, setAutoExclude] = useState(_saved ? _saved.autoExclude !== false : true);
   const [allstatCount, setAllstatCount] = useState(_saved ? _saved.allstatCount !== false : true);
   const [costs, setCosts] = useState(_saved?.costs ?? { ...COST_DEFAULT[_saved?.level ?? 200] });
-  const [statPrices, setStatPrices] = useState(_saved?.statPrices ?? {});
+  const [statPrices, setStatPrices] = useState(() => migratePrices(_saved?.statPrices ?? {}));
   const [hatRows, setHatRows] = useState(_saved?.hatRows?.length ? _saved.hatRows : [{ cd: 2, statMin: 12, stat: "STR", price: "" }, { cd: 3, statMin: 0, stat: "STR", price: "" }, { cd: 4, statMin: 0, stat: "STR", price: "" }]);
   const [gloveRows, setGloveRows] = useState(_saved?.gloveRows?.length ? _saved.gloveRows : [{ crit: 8, statMin: 12, stat: "STR", price: "" }, { crit: 16, statMin: 0, stat: "STR", price: "" }, { crit: 24, statMin: 0, stat: "STR", price: "" }]);
   const [accPrices, setAccPrices] = useState(_saved?.accPrices ?? { drop2: "", meso2: "", dropmeso: "", dm3: "" });
@@ -584,7 +593,7 @@ export default function App() {
     setItemPriceEok(s.itemPriceEok ?? "3"); setFee(s.fee ?? "3"); setPity(s.pity ?? "0"); setFloorEok(s.floorEok ?? "1.5");
     setMiracle(!!s.miracle); setAutoExclude(s.autoExclude !== false); setAllstatCount(s.allstatCount !== false);
     setCosts(s.costs ?? { ...COST_DEFAULT[s.level ?? 200] });
-    setStatPrices(s.statPrices ?? {});
+    setStatPrices(migratePrices(s.statPrices ?? {}));
     if (s.hatRows?.length) setHatRows(s.hatRows);
     if (s.gloveRows?.length) setGloveRows(s.gloveRows);
     setAccPrices(s.accPrices ?? { drop2: "", meso2: "", dropmeso: "", dm3: "" });
@@ -608,64 +617,79 @@ export default function App() {
   const allThresholds = useMemo(() => (level === 250 ? [18, 21, 24, 27, 30] : [18, 21, 24, 27]), [level]);
   const statMinOpts = level === 250 ? [0, 7, 10, 13, 14, 17, 20, 23, 26] : [0, 6, 9, 12, 18, 21];
 
-  // 타겟 목록 구성
+  const [priceGrade, setPriceGrade] = useState("u"); // 판매가 입력 탭: u(유니크) | l(레전드리)
+  const copyPricesToOther = () => {
+    const from = priceGrade, to = priceGrade === "u" ? "l" : "u";
+    setStatPrices((sp) => {
+      const next = { ...sp };
+      for (const k in sp) if (k.startsWith(from + ":")) next[to + ":" + k.slice(2)] = sp[k];
+      return next;
+    });
+  };
+
+  // 타겟 목록 구성 — 유니크/레전드리 가격 집합 분리 (구간 경계도 등급별 입력값 기준)
   const targets = useMemo(() => {
-    const list = [];
     const num = (v) => { const n = parseFloat(v); return isFinite(n) && n > 0 ? n * 1e8 : null; };
-    if (part !== "glove") {
-      for (const st of [...STATS, "HP"])
-        for (const th of thresholds) {
-          const p = num(statPrices[`${st}_${th}`]);
-          if (p) list.push({
-            id: `${st}_${th}`, kind: st === "HP" ? "hp" : "stat", stat: st, min: th, price: p,
-            label: `${st === "HP" ? "MaxHP" : st} ${th}%↑`,
-          });
+    const build = (g) => {
+      const list = [];
+      if (part !== "glove") {
+        for (const st of [...STATS, "HP"])
+          for (const th of thresholds) {
+            const p = num(statPrices[`${g}:${st}_${th}`]);
+            if (p) list.push({ id: `${st}_${th}`, kind: st === "HP" ? "hp" : "stat", stat: st, min: th, price: p,
+              base: `${st === "HP" ? "MaxHP" : st} ${th}%`, range: `${th}%↑` });
+          }
+        for (const th of allThresholds) {
+          const p = num(statPrices[`${g}:ALL_${th}`]);
+          if (p) list.push({ id: `ALL_${th}`, kind: "allsum", min: th, price: p, base: `올스탯 ${th}%`, range: `${th}%↑` });
         }
-      for (const th of allThresholds) {
-        const p = num(statPrices[`ALL_${th}`]);
-        if (p) list.push({ id: `ALL_${th}`, kind: "allsum", min: th, price: p, label: `올스탯 ${th}%↑` });
       }
-    }
-    if (part === "hat") hatRows.forEach((r, i) => {
-      const p = num(r.price);
-      if (p) list.push({ id: `hat_${i}`, kind: "hat", cd: r.cd, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
-        label: `쿨감 ${r.cd}초↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}` });
-    });
-    if (part === "glove") gloveRows.forEach((r, i) => {
-      const p = num(r.price);
-      if (p) list.push({ id: `glove_${i}`, kind: "glove", crit: r.crit, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
-        label: `크뎀 ${r.crit}%↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}` });
-    });
-    if (part === "acc") {
-      const labels = { drop2: "드랍 2줄↑", meso2: "메획 2줄↑", dropmeso: "드랍+메획 각 1줄↑", dm3: "드메 합 3줄" };
-      for (const k of Object.keys(labels)) {
-        const p = num(accPrices[k]);
-        if (p) list.push({ id: `dm_${k}`, kind: "dm", combo: k, price: p, label: labels[k] });
-      }
-    }
-    // 스탯 계열 라벨을 구간 표기로 변환 (같은 계열의 다음 입력 기준치 미만)
-    const famKey = (t) => t.kind === "stat" ? "s:" + t.stat : t.kind === "hp" ? "hp" : t.kind === "allsum" ? "all" : null;
-    const byFam = {};
-    list.forEach((t) => { const k = famKey(t); if (k) (byFam[k] = byFam[k] || []).push(t); });
-    for (const k in byFam) {
-      byFam[k].sort((a, b) => a.min - b.min);
-      byFam[k].forEach((t, i, arr) => {
-        if (arr[i + 1]) t.label = t.label.replace(`${t.min}%↑`, `${t.min}~${arr[i + 1].min - 1}%`);
+      if (part === "hat") hatRows.forEach((r, i) => {
+        const p = num(r.price);
+        if (p) list.push({ id: `hat_${i}`, kind: "hat", cd: r.cd, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
+          base: `쿨감 ${r.cd}초↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}`, range: "" });
       });
-    }
-    return list;
+      if (part === "glove") gloveRows.forEach((r, i) => {
+        const p = num(r.price);
+        if (p) list.push({ id: `glove_${i}`, kind: "glove", crit: r.crit, statMin: r.statMin, stat: r.statMin ? (r.stat || "STR") : null, price: p,
+          base: `크뎀 ${r.crit}%↑${r.statMin ? ` + ${r.stat || "STR"} ${r.statMin}%↑` : ""}`, range: "" });
+      });
+      if (part === "acc") {
+        const labels = { drop2: "드랍 2줄↑", meso2: "메획 2줄↑", dropmeso: "드랍+메획 각 1줄↑", dm3: "드메 합 3줄" };
+        for (const k of Object.keys(labels)) {
+          const p = num(accPrices[k]);
+          if (p) list.push({ id: `dm_${k}`, kind: "dm", combo: k, price: p, base: labels[k], range: "" });
+        }
+      }
+      // 스탯 계열 구간 표기 (같은 계열의 다음 입력 기준치 미만)
+      const famKey = (t) => t.kind === "stat" ? "s:" + t.stat : t.kind === "hp" ? "hp" : t.kind === "allsum" ? "all" : null;
+      const byFam = {};
+      list.forEach((t) => { const k = famKey(t); if (k) (byFam[k] = byFam[k] || []).push(t); });
+      for (const k in byFam) {
+        byFam[k].sort((a, b) => a.min - b.min);
+        byFam[k].forEach((t, i, arr) => { if (arr[i + 1]) t.range = `${t.min}~${arr[i + 1].min - 1}%`; });
+      }
+      list.forEach((t) => { t.label = t.range ? t.base.replace(`${t.min}%`, t.range) : t.base; });
+      return list;
+    };
+    return { u: build("u"), l: build("l") };
   }, [part, thresholds, allThresholds, statPrices, hatRows, gloveRows, accPrices]);
 
+  // 판정표 행: 두 등급 타겟의 합집합
+  const rowIds = []; const byId = {};
+  [...targets.u, ...targets.l].forEach((t) => { if (!byId[t.id]) { byId[t.id] = { base: t.base, u: null, l: null }; rowIds.push(t.id); } });
+  targets.u.forEach((t) => (byId[t.id].u = t)); targets.l.forEach((t) => (byId[t.id].l = t));
+
   const cfgInput = useMemo(() => ({
-    targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity, pityMode,
+    targetsU: targets.u, targetsL: targets.l, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity, pityMode,
   }), [targets, part, level, allstatCount, miracle, autoExclude, fee, costs, itemPriceEok, floorEok, pity, pityMode]);
   const dcfg = useDeferredValue(cfgInput);
 
   const result = useMemo(() => {
-    if (dcfg.targets.length === 0) return null;
+    if (dcfg.targetsU.length === 0 && dcfg.targetsL.length === 0) return null;
     try {
       const cfg = {
-        part: dcfg.part, level: dcfg.level, targets: dcfg.targets,
+        part: dcfg.part, level: dcfg.level, targetsU: dcfg.targetsU, targetsL: dcfg.targetsL,
         allstatCount: dcfg.allstatCount, miracle: dcfg.miracle, autoExclude: dcfg.autoExclude,
         fee: parseFloat(dcfg.fee) || 0,
         costs: { epic: +dcfg.costs.epic || 0, unique: +dcfg.costs.unique || 0, legend: +dcfg.costs.legend || 0 },
@@ -695,12 +719,12 @@ export default function App() {
   const eng = result && !result.error ? result.eng : null;
   const judgedMap = {};
   if (eng) {
-    for (const t of targets) {
-      const inU = eng.uCap.some((x) => x.id === t.id);
-      const inL = eng.lCap.some((x) => x.id === t.id);
-      judgedMap[t.id] = {
-        u: inU ? !!eng.judgeU[t.id] : null,        // 유니크: 판매(true)/홀드(false)/도달불가(null)
-        l: inL ? !!eng.judgeL[t.id] : null,        // 레전드리 판정 (최적 정지)
+    for (const id of rowIds) {
+      const inU = eng.uCap.some((x) => x.id === id);
+      const inL = eng.lCap.some((x) => x.id === id);
+      judgedMap[id] = {
+        u: inU ? !!eng.judgeU[id] : null,        // 유니크: 판매(true)/홀드(false)/도달불가(null)
+        l: inL ? !!eng.judgeL[id] : null,        // 레전드리 판정 (최적 정지)
       };
     }
   }
@@ -715,10 +739,12 @@ export default function App() {
     : null;
   const compTotal = result && result.mc ? (result.mc.compRounds || result.mc.rounds) : 0;
   const compEntries = result && result.mc
-    ? Object.entries(result.mc.tidCount).sort((a, b) => b[1] - a[1]).map(([tid, n]) => ({
-        label: tid === "__floor" ? "레전 깡통 처분" : (targets.find((t) => t.id === tid) || {}).label || tid,
-        share: n / compTotal,
-      }))
+    ? Object.entries(result.mc.tidCount).sort((a, b) => b[1] - a[1]).map(([tid, n]) => {
+        if (tid === "__floor") return { label: "레전 깡통 처분", share: n / compTotal };
+        const g = tid.slice(0, 1), id = tid.slice(2);
+        const t = g === "u" ? byId[id]?.u : byId[id]?.l;
+        return { label: `${t ? t.label : id} · ${g === "u" ? "유니크" : "레전드리"}`, share: n / compTotal };
+      })
     : [];
 
   return (
@@ -828,8 +854,26 @@ export default function App() {
             </div>
             {part !== "glove" && (
               <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
-                <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em", marginBottom: 8 }}>
-                  판매가 — 스탯 합계 (억 메소 · 빈칸 = 종료조건 제외)
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 12, color: C.sub, fontWeight: 700, letterSpacing: ".06em" }}>
+                    판매가 — 스탯 합계 (억 메소 · 빈칸 = 그 등급에선 판매 안 함)
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {[["u", "유니크 매물 가격", C.unique], ["l", "레전드리 매물 가격", C.legend]].map(([k, lb, col]) => (
+                      <button key={k} onClick={() => setPriceGrade(k)} style={{
+                        background: priceGrade === k ? `${col}22` : C.panel2,
+                        border: `1px solid ${priceGrade === k ? col : C.border}`,
+                        color: priceGrade === k ? col : C.sub, borderRadius: 8, padding: "5px 12px",
+                        fontSize: 12, fontWeight: priceGrade === k ? 700 : 400, cursor: "pointer", fontFamily: "inherit" }}>
+                        {lb}
+                      </button>
+                    ))}
+                    <button onClick={copyPricesToOther} title="현재 탭의 가격을 다른 등급 탭에 덮어씀" style={{
+                      background: "none", border: `1px solid ${C.border}`, color: C.sub, borderRadius: 8,
+                      padding: "5px 10px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
+                      → {priceGrade === "u" ? "레전" : "유니크"} 탭에 복사
+                    </button>
+                  </div>
                 </div>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
@@ -843,8 +887,8 @@ export default function App() {
                           <td style={{ padding: 4, color: st === "HP" ? "#e58fb1" : C.text, fontWeight: 600 }}>{st === "HP" ? "MaxHP" : st}</td>
                           {thresholds.map((th) => (
                             <td key={th} style={{ padding: 2, textAlign: "center" }}>
-                              <Num w={62} value={statPrices[`${st}_${th}`] ?? ""} ph="—"
-                                onChange={(v) => setStatPrices((s) => ({ ...s, [`${st}_${th}`]: v }))} />
+                              <Num w={62} value={statPrices[`${priceGrade}:${st}_${th}`] ?? ""} ph="—"
+                                onChange={(v) => setStatPrices((s) => ({ ...s, [`${priceGrade}:${st}_${th}`]: v }))} />
                             </td>
                           ))}
                         </tr>
@@ -856,8 +900,8 @@ export default function App() {
                             {i < allThresholds.length ? (
                               <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
                                 <span style={{ fontSize: 10, color: "#8fd3e5" }}>{allThresholds[i]}%↑</span>
-                                <Num w={62} value={statPrices[`ALL_${allThresholds[i]}`] ?? ""} ph="—"
-                                  onChange={(v) => setStatPrices((s) => ({ ...s, [`ALL_${allThresholds[i]}`]: v }))} />
+                                <Num w={62} value={statPrices[`${priceGrade}:ALL_${allThresholds[i]}`] ?? ""} ph="—"
+                                  onChange={(v) => setStatPrices((s) => ({ ...s, [`${priceGrade}:ALL_${allThresholds[i]}`]: v }))} />
                               </div>
                             ) : null}
                           </td>
@@ -867,6 +911,7 @@ export default function App() {
                   </table>
                 </div>
                 <div style={{ fontSize: 11, color: C.sub, marginTop: 6 }}>
+                  {priceGrade === "u" ? "유니크 등급 매물" : "레전드리 등급 매물"} 기준 시세를 입력하세요 — 같은 24%라도 등급에 따라 시세가 달라 따로 받아요 ·
                   매물 수치가 속한 구간(기준치 이상 ~ 같은 행의 다음 입력 기준치 미만)의 가격으로 판매 · 여러 행 동시 충족 시 최고가 적용 · MaxHP엔 올스탯 미합산 ·
                   올스탯 행은 올스탯% 줄만의 합계(제논용, 단일 스탯 줄 미포함)이라 기준치가 달라요
                 </div>
@@ -1006,44 +1051,40 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead><tr style={{ color: C.sub }}>
                       <th style={{ textAlign: "left", padding: "4px 6px" }}>타겟</th>
-                      <th style={{ textAlign: "right", padding: "4px 6px" }}>판매가</th>
-                      <th style={{ textAlign: "center", padding: "4px 6px" }}>유니크에서</th>
-                      <th style={{ textAlign: "center", padding: "4px 6px" }}>레전드리에서</th>
+                      <th style={{ textAlign: "center", padding: "4px 6px" }}>유니크에서 (구간 · 가격 · 판정 · 확률/회)</th>
+                      <th style={{ textAlign: "center", padding: "4px 6px" }}>레전드리에서 (구간 · 가격 · 판정 · 확률/회)</th>
                     </tr></thead>
                     <tbody>
-                      {targets.map((t) => {
-                        const j = judgedMap[t.id] || {};
-                        const up = eng.uProb[t.id] || 0, lp = eng.lProb[t.id] || 0;
+                      {rowIds.map((id) => {
+                        const row = byId[id]; const j = judgedMap[id] || {};
+                        const cell = (tg, jg, prob, holdLabel) => tg ? (
+                          <>
+                            <div style={{ fontSize: 10, color: C.sub, marginBottom: 3 }}>{tg.range || "—"} · {fmtMeso(tg.price)}</div>
+                            {jg === null || jg === undefined ? <Badge kind="na">도달 불가</Badge>
+                              : jg ? <Badge kind="sell">판매</Badge> : <Badge kind="hold">{holdLabel}</Badge>}
+                            <div style={{ fontSize: 10, color: C.sub, marginTop: 3 }}>{prob > 1e-12 ? fmtPct(prob) : "—"}</div>
+                          </>
+                        ) : <span style={{ fontSize: 11, color: C.sub }}>가격 미입력</span>;
                         return (
-                          <tr key={t.id} onMouseEnter={(e) => { setHoverTid(t.id); setHoverPos({ x: e.clientX, y: e.clientY }); }}
-                            onClick={(e) => { setHoverPos({ x: e.clientX, y: e.clientY }); setHoverTid(hoverTid === t.id ? null : t.id); }}
+                          <tr key={id} onMouseEnter={(e) => { setHoverTid(id); setHoverPos({ x: e.clientX, y: e.clientY }); }}
+                            onClick={(e) => { setHoverPos({ x: e.clientX, y: e.clientY }); setHoverTid(hoverTid === id ? null : id); }}
                             style={{ borderTop: `1px solid ${C.border}`, cursor: "pointer",
-                              background: hoverTid === t.id ? C.panel2 : "transparent" }}>
-                            <td style={{ padding: "6px" }}>{t.label}</td>
-                            <td style={{ padding: "6px", textAlign: "right", color: C.sub }}>{fmtMeso(t.price)}</td>
-                            <td style={{ padding: "6px", textAlign: "center" }}>
-                              {j.u === null || j.u === undefined ? <Badge kind="na">도달 불가</Badge>
-                                : j.u ? <Badge kind="sell">판매</Badge> : <Badge kind="hold">홀드 · 재설정 이득</Badge>}
-                              <div style={{ fontSize: 10, color: C.sub, marginTop: 3 }}>{up > 1e-12 ? fmtPct(up) + "/회" : "—"}</div>
-                            </td>
-                            <td style={{ padding: "6px", textAlign: "center" }}>
-                              {j.l === null || j.l === undefined ? <Badge kind="na">도달 불가</Badge>
-                                : j.l ? <Badge kind="sell">판매</Badge> : <Badge kind="hold">홀드 · 상위 노리기</Badge>}
-                              <div style={{ fontSize: 10, color: C.sub, marginTop: 3 }}>{lp > 1e-12 ? fmtPct(lp) + "/회" : "—"}</div>
-                            </td>
+                              background: hoverTid === id ? C.panel2 : "transparent" }}>
+                            <td style={{ padding: "6px" }}>{row.base}</td>
+                            <td style={{ padding: "6px", textAlign: "center" }}>{cell(row.u, j.u, eng.uProb[id] || 0, "홀드 · 재설정 이득")}</td>
+                            <td style={{ padding: "6px", textAlign: "center" }}>{cell(row.l, j.l, eng.lProb[id] || 0, "홀드 · 상위 노리기")}</td>
                           </tr>
                         );
                       })}
                     </tbody>
                   </table>
                   <div style={{ fontSize: 11, color: C.sub, marginTop: 8 }}>
-                    각 셀 아래 %는 해당 구간 도달 확률/회 · 행에 마우스를 올리면(또는 탭하면) 도달 가능한 옵션 조합별 확률을 보여줘요 ·
+                    구간은 등급별 입력 기준치 기준 · 확률은 해당 구간 도달 확률/회 · 행에 마우스를 올리면(또는 탭하면) 도달 가능한 옵션 조합별 확률을 보여줘요 ·
                     유니크 판정 기준: 0.97×판매가 &gt; 매입가+에픽구간 비용({fmtMeso(eng.reentry)}) — 천장은 캐릭터 귀속이라 팔아도 이월되므로 카운트와 무관 ·
                     레전드리 판정: 계속 재설정 시 기대 수익과 비교(최적 정지)
                   </div>
-                  {hoverTid && (() => {
-                    const t = targets.find((x) => x.id === hoverTid);
-                    if (!t) return null;
+                  {hoverTid && byId[hoverTid] && (() => {
+                    const row = byId[hoverTid];
                     const renderCombos = (m) => {
                       const es = Object.entries(m || {}).sort((a, b) => b[1] - a[1]);
                       if (!es.length) return <div style={{ fontSize: 11, color: C.sub }}>도달 조합 없음</div>;
@@ -1071,15 +1112,19 @@ export default function App() {
                         maxHeight: below ? vh - hoverPos.y - 24 : hoverPos.y - 20, overflow: "hidden",
                         background: C.panel2, border: `1px solid ${C.border}`, borderRadius: 8, padding: 12,
                         boxShadow: "0 8px 24px rgba(0,0,0,.5)" }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{t.label} — 구간 도달 조합 (기타 = 미추적 옵션 아무거나)</div>
+                        <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8 }}>{row.base} — 구간 도달 조합 (기타 = 미추적 옵션 아무거나)</div>
                         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                           <div style={{ flex: "1 1 220px" }}>
-                            <div style={{ fontSize: 11, color: C.unique, fontWeight: 700, marginBottom: 4 }}>유니크 재설정 시 · 합 {fmtPct(eng.uProb[t.id] || 0)}</div>
-                            {renderCombos(eng.uCombos[t.id])}
+                            <div style={{ fontSize: 11, color: C.unique, fontWeight: 700, marginBottom: 4 }}>
+                              유니크 재설정 시{row.u?.range ? ` · 구간 ${row.u.range}` : ""} · 합 {row.u ? fmtPct(eng.uProb[hoverTid] || 0) : "가격 미입력"}
+                            </div>
+                            {row.u ? renderCombos(eng.uCombos[hoverTid]) : null}
                           </div>
                           <div style={{ flex: "1 1 220px" }}>
-                            <div style={{ fontSize: 11, color: C.legend, fontWeight: 700, marginBottom: 4 }}>레전드리 재설정 시 · 합 {fmtPct(eng.lProb[t.id] || 0)}</div>
-                            {renderCombos(eng.lCombos[t.id])}
+                            <div style={{ fontSize: 11, color: C.legend, fontWeight: 700, marginBottom: 4 }}>
+                              레전드리 재설정 시{row.l?.range ? ` · 구간 ${row.l.range}` : ""} · 합 {row.l ? fmtPct(eng.lProb[hoverTid] || 0) : "가격 미입력"}
+                            </div>
+                            {row.l ? renderCombos(eng.lCombos[hoverTid]) : null}
                           </div>
                         </div>
                       </div>
